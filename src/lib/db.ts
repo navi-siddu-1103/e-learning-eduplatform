@@ -6,7 +6,8 @@ interface GlobalMongoose {
 }
 
 declare global {
-  let mongoose: GlobalMongoose | undefined;
+    // Augmenting the NodeJS global type
+    var mongoose: GlobalMongoose | undefined;
 }
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/e-learning-platform';
