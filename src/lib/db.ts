@@ -3,12 +3,20 @@ import mongoose from 'mongoose';
 interface GlobalMongoose {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
+  isConnecting: boolean;
 }
 
 declare global {
-    // Augmenting the NodeJS global type
-    var mongoose: GlobalMongoose | undefined;
+  // eslint-disable-next-line no-var
+  var mongoose: GlobalMongoose;
 }
+
+// Initialize the global mongoose object with proper types
+global.mongoose = global.mongoose || {
+  conn: null,
+  promise: null,
+  isConnecting: false
+};
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/e-learning-platform';
 
@@ -16,48 +24,33 @@ if (!MONGODB_URI) {
   throw new Error('Please define the MONGODB_URI environment variable');
 }
 
-// Initialize global mongoose with proper types
-if (!global.mongoose) {
-  global.mongoose = { conn: null, promise: null };
-}
-
 const cached = global.mongoose;
 
 export async function connectDB() {
+  // If we have a connection, return it
   if (cached.conn) {
     return cached.conn;
   }
 
-  if (!cached.promise) {
-    const opts = {
-      bufferCommands: false,
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
-      family: 4, // Use IPv4, skip trying IPv6
-    };
-
-    try {
-      cached.promise = mongoose
-        .connect(MONGODB_URI, opts)
-        .then((mongoose) => {
-          console.log('MongoDB connected successfully');
-          return mongoose;
-        })
-        .catch((error) => {
-          console.error('MongoDB connection error:', error);
-          cached.promise = null;
-          throw error;
-        });
-    } catch (error) {
-      console.error('Failed to create MongoDB connection:', error);
-      throw error;
+  // If we're already connecting, wait for the existing promise
+  if (cached.isConnecting) {
+    if (cached.promise) {
+      return await cached.promise;
     }
+    throw new Error('Connection in progress but no promise available');
   }
 
-  try {
+  const opts: mongoose.ConnectOptions = {
+    bufferCommands: false,
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    family: 4, // Use IPv4, skip trying IPv6
+  };  try {
+    cached.isConnecting = true;
+    cached.promise = mongoose.connect(MONGODB_URI, opts);
     cached.conn = await cached.promise;
-    
+
     // Add connection event handlers
     mongoose.connection.on('connected', () => {
       console.log('MongoDB connection established');
@@ -65,16 +58,20 @@ export async function connectDB() {
 
     mongoose.connection.on('error', (err) => {
       console.error('MongoDB connection error:', err);
+      cached.isConnecting = false;
+      cached.conn = null;
+      cached.promise = null;
     });
 
     mongoose.connection.on('disconnected', () => {
       console.log('MongoDB connection disconnected');
-    });
-
-    // Handle graceful shutdown
+      cached.isConnecting = false;
+      cached.conn = null;
+      cached.promise = null;
+    });    // Handle graceful shutdown
     process.on('SIGINT', async () => {
       try {
-        await mongoose.connection.close();
+        await disconnectDB();
         console.log('MongoDB connection closed through app termination');
         process.exit(0);
       } catch (err) {
@@ -83,20 +80,24 @@ export async function connectDB() {
       }
     });
 
+    console.log('MongoDB connected successfully');
     return cached.conn;
   } catch (error) {
     console.error('Failed to establish MongoDB connection:', error);
+    cached.isConnecting = false;
+    cached.conn = null;
     cached.promise = null;
     throw error;
   }
 }
 
 export async function disconnectDB() {
-  if (cached.conn) {
+  if (mongoose.connection.readyState !== 0) {
     try {
       await mongoose.connection.close();
       cached.conn = null;
       cached.promise = null;
+      cached.isConnecting = false;
       console.log('MongoDB disconnected successfully');
     } catch (error) {
       console.error('Error disconnecting from MongoDB:', error);
@@ -108,8 +109,22 @@ export async function disconnectDB() {
 export function getConnectionStatus() {
   return {
     isConnected: mongoose.connection.readyState === 1,
-    state: mongoose.connection.readyState,
+    isConnecting: cached.isConnecting,
+    readyState: mongoose.connection.readyState,
     // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+  };
+}
+
+export function getDatabaseStats() {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database not connected');
+  }
+  
+  return {
+    host: mongoose.connection.host,
+    port: mongoose.connection.port,
+    name: mongoose.connection.name,
+    collections: mongoose.connection.collections,
   };
 }
 
